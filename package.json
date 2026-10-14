@@ -1,0 +1,24 @@
+{
+  "name": "new-buddy-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Rewrite of buddy-agent (茂日门店助手) onto the Pi agent runtime.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "demo": "tsx examples/minimal-tool-loop/demo.mts",
+    "typecheck": "tsc --noEmit --strict"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "typebox": "1.3.27"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
