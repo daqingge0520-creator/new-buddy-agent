@@ -4,3 +4,5 @@ dist/
 .env
 .env.*
 !.env.example
+# Local checkout of earendil-works/pi for reading against the guide (not vendored).
+pi-src/
