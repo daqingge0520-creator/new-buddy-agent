@@ -1,6 +1,6 @@
 > **版本锁定**：本文与本仓库示例均锁定 pi **v1.2.0**（`@earendil-works/pi-ai@1.2.0`、`@earendil-works/pi-agent-core@1.2.0`）。不要跟 pi 的 main。可运行示例在 [`examples/minimal-tool-loop/demo.mts`](../examples/minimal-tool-loop/demo.mts)。
 
-# Pi 源码导读（pi-ai + pi-agent-core）——为重写「茂日门店助手」准备
+# Pi 源码导读（pi-ai + pi-agent-core）——为重写「门店智能客服」准备
 
 日期：2026-10-14 ｜ 配套调研：`pi-buddy-agent-rewrite.md`（这里不再重复其中的结论）
 
@@ -262,7 +262,7 @@ const lookupMember: AgentTool<typeof MemberParams> = {
 };
 
 const agent = new Agent({
-  initialState: { systemPrompt: "你是茂日门店助手。", model, tools: [lookupMember] },
+  initialState: { systemPrompt: "你是门店智能客服。", model, tools: [lookupMember] },
   streamFn: (m, ctx, opts) => models.streamSimple(m, ctx, opts),
   beforeToolCall: async ({ toolCall }) => { console.log(`\n[鉴权] ${toolCall.name} ok`); return undefined; },
 });

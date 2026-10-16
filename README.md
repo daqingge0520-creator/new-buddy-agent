@@ -1,6 +1,6 @@
-# new-buddy-agent
+# Buddy Agent
 
-茂日门店助手（buddy-agent）正在重写到 [Pi](https://github.com/earendil-works/pi) 运行时。运行时只用 `@earendil-works/pi-ai` 和 `@earendil-works/pi-agent-core`，**锁定 v1.2.0**。不用 `pi-coding-agent` 当运行时。
+门店智能客服（Buddy Agent）正在重写到 [Pi](https://github.com/earendil-works/pi) 运行时。运行时只用 `@earendil-works/pi-ai` 和 `@earendil-works/pi-agent-core`，**锁定 v1.2.0**。不用 `pi-coding-agent` 当运行时。
 
 这一周的目标是把一条链路跑通：**一个问题 → 一次工具调用 → 流式回答**。本仓库目前只有源码导读和本地最小 demo，没有 HTTP / SSE、没有 MySQL、也没有多租户宿主层。
 

@@ -35,7 +35,7 @@ const lookupMember: AgentTool<typeof MemberParams> = {
 
 // 3) Agent：宿主层钩子插在这里
 const agent = new Agent({
-  initialState: { systemPrompt: "你是茂日门店助手。", model, tools: [lookupMember] },
+  initialState: { systemPrompt: "你是门店智能客服。", model, tools: [lookupMember] },
   streamFn: (m, ctx, opts) => models.streamSimple(m, ctx, opts),
   beforeToolCall: async ({ toolCall }) => { console.log(`\n[鉴权] ${toolCall.name} ok`); return undefined; },
 });

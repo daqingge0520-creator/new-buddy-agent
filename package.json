@@ -1,8 +1,8 @@
 {
-  "name": "new-buddy-agent",
+  "name": "buddy-agent",
   "version": "0.0.0",
   "private": true,
-  "description": "Rewrite of buddy-agent (茂日门店助手) onto the Pi agent runtime.",
+  "description": "Buddy Agent: store customer-service agent rewrite onto the Pi runtime.",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
