@@ -235,6 +235,146 @@ H 把 followUp 塞进 pending，外层 continue → 新内层因 pending 进入 
 - `thinkingLevel === "off" ? undefined : level`：配置里用 `undefined` 表示关思考，和字面 `"off"` 在这里统一。  
 - `decision?.action === "end"`：decision 为空则短路为假。
 
-### 下一步
-- 精读 `streamAssistantResponse`（`agent-loop.ts:381-469`）：partial 消息怎么边流边推进 context、事件怎么发。
-- 再读 `executeToolCalls` 及 parallel/sequential 分支。
+### 下一步（本节当时）
+- 精读 `streamAssistantResponse`（仍待做）。
+- `executeToolCalls` 已在同日 §8–§14 补完。
+
+### 8. 工具执行总览：从 runLoop 到回填（`agent-loop.ts:258-277`，`508-949`）
+来源：Cursor Chat，接着 runLoop 内层流水线里「模型返回后跑工具」一段。
+
+```
+streamAssistantResponse → message（assistant）
+  → 有无 toolCall？
+       无 → toolResults=[]，hasMoreToolCalls=false
+       有 → stopReason==="length"？
+              是 → failToolCallsFromTruncatedMessage（故意全失败，不真跑）
+              否 → executeToolCalls（真跑）
+  → push toolResult 进 currentContext.messages / newMessages   ←「回填」
+  → hasMoreToolCalls = !terminate
+  → finishTurn → turn_end → 内层可能再调模型
+```
+
+回填代码（真正写历史在这里，不在小函数里）：
+
+```ts
+for (const result of toolResults) {
+  currentContext.messages.push(result);
+  newMessages.push(result);
+}
+```
+
+单工具流水线（串行/并行共用）：
+
+```
+tool_execution_start
+  → prepareToolCallArguments（可选）
+  → validateToolArguments
+  → beforeToolCall（可选钩子）
+  → immediate？ → 跳过 execute
+  → executePreparedToolCall
+  → finalizeExecutedToolCall（afterToolCall）
+  → tool_execution_end
+  → 做成 toolResult → message_start/end
+```
+
+失败原则：工具失败不炸循环；一律变成 toolResult（或 immediate 错误）喂回模型。
+
+### 9. prepareArguments / prepareToolCallArguments（`agent-loop.ts:694-706`，`edit.ts`）
+涉及：`packages/agent/src/agent-loop.ts`，`packages/coding-agent/src/core/tools/edit.ts`
+
+**做什么：** 校验**之前**，若该工具挂了可选的 `prepareArguments`，先把参数「整形」成符合 schema 的形状。
+
+**不是** Pi 要求每个工具都实现；coding-agent 内置工具里目前主要是 **edit** 有。  
+`agent-loop` 只判断：有就调，没有就原样往下。
+
+```ts
+const preparedArguments = tool.prepareArguments(toolCall.arguments);
+// 同一引用 → 返回原 toolCall；新对象 → 只换 arguments
+```
+
+Java 对照：接口上可选的 `default` 规范化方法；多数实现不 override。
+
+**真实例子（edit）：**  
+schema 要 `{ path, edits: [{oldText,newText}] }`；模型常给旧顶层 `{ path, oldText, newText }`。  
+`prepareEditArguments` 把顶层折进 `edits`，再交给校验。
+
+**和 validate 分工：** prepare 改形状；validate 查类型/必填并可做 `"10"`→`10` 等强转。
+
+**误区：** 以为 Pi 所有工具参数都必须是 `edits` 那种格式。  
+**正确：** Pi 规定的是 `AgentTool` 外壳（name / parameters / execute / 可选 prepareArguments）；每个工具自己的 `parameters` 可以完全不同。
+
+### 10. validateToolArguments（`packages/ai/src/utils/validation.ts:317-353`）
+流水线：`argumentsError` 直接抛 → clone → `normalizeOptionalNulls`（可选字段上的假 null 删掉）→ TypeBox `Value.Convert` → 非 TypeBox 时再 `coerceWithJsonSchema` → `Check`，失败拼路径 throw。  
+抛错被 `prepareToolCall` 的 catch 收成 immediate 错误结果。
+
+### 11. beforeToolCall 钩子（`prepareToolCall` 728-756；实现挂在 Agent / Session）
+**钩子 =** 框架在固定步骤留的插口：你挂上函数，到点框架调你；不挂则跳过。≈ Java Filter / 拦截器。
+
+**before 时机：** 参数已校验通过，**尚未** execute。可返回 `{ block: true, reason }` 拦住。
+
+**调用点（框架）：** `agent-loop.ts` `prepareToolCall` 里 `config.beforeToolCall(...)`。  
+**传入：** `agent.ts` 把 `this.beforeToolCall` 塞进 loop config。  
+**业务实现（coding-agent）：** `agent-session.ts` `_installAgentToolHooks` 赋值为 `_beforeToolCall` → 转发给扩展 `tool_call` 事件；没扩展则放行。
+
+**真实场景：** 禁用 bash；按 path/命令做权限；UI 确认框；扩展拦截。
+
+**误区：** 在 agent-loop 里找「拦 bash」的业务代码。  
+**正确：** loop 只有插口；具体拦不拦在 Session/扩展/你赋值的函数里。
+
+和 prepare 对比：prepare 挂在**某个工具**上改形状；before 挂在 **Agent 级**管所有工具的放行。
+
+### 12. executePreparedToolCall 与 acceptingUpdates（`agent-loop.ts:821-857`）
+**先懂三句：**
+1. 工具跑时可边跑边报进度（→ `tool_execution_update`）。
+2. `execute` 一结束，最终结果已定，进度通道该关。
+3. `acceptingUpdates` = 还接不接新进度；settle 后立刻 `false`，晚到回调直接忽略。
+
+函数步骤：调 `tool.execute` → 收进度入 `updateEvents` → settle → **关开关** → `Promise.all(updateEvents)` → 返回 `{ result, isError, durationMs }`。永不往上抛（catch 成错误结果）。
+
+**为什么先关再 Promise.all：** 避免等的过程中又塞进新进度；并保证旧进度发完再进入 end。  
+**真干活不在这里：** 这里只按按钮；`read.execute` / `bash.execute` 在各自工具文件里。
+
+类型约定：`onUpdate` 只在本次 `execute()` 未结束前有效。
+
+### 13. finalize / 出口 / after 真实场景（`859-949`）
+**finalizeExecutedToolCall：** 可选 `afterToolCall` 按字段覆盖结果；钩子抛错 → 整份变错误。`durationMs` 不改。
+
+**常做的真实事：**
+- coding-agent：压图（`normalizeToolResultImages`）、扩展 `tool_result` 改 content/details  
+- 成功后设 `terminate: true`（少打一次自动 follow-up LLM）  
+- 脱敏、打审计标  
+
+**出口：** `emitToolExecutionEnd`（停 UI 转圈）→ `createToolResultMessage` + `emitToolResultMessage`（给模型的回信事件）。  
+push context 仍在 runLoop。
+
+### 14. parallel 默认行为（`executeToolCallsParallel` 586-660）
+**先记住：**
+1. **preflight 顺序做**（start + prepare/before）  
+2. **execute 并行**（`Promise.all`）  
+3. **`tool_execution_end` 按完成快慢**  
+4. **`toolResult` 消息按助手原始 call 顺序**统一发  
+
+例子：read 慢、bash 快 → end 可能先 bash 后 read；消息仍先 read 后 bash。  
+任一工具 `executionMode === "sequential"` 或 config 为 sequential → 整批串行。
+
+`terminate`：本批**每一个** `result.terminate === true` 才为真。
+
+截断：`failToolCallsFromTruncatedMessage`，`terminate: false`，让模型带错误结果再开一轮。
+
+### 15. runToolCall（`811-818`）——嵌套调用入口
+**不是主循环模型调工具的路径。** 主循环直接走 `executeToolCalls*`。
+
+**一句话：** 代码里再调一个工具，并且要走校验 + before/after；结果 return 给调用方，不负责写入聊天记录。
+
+**何时触发：** 只有业务主动调。典型：
+- 模型先调 codemode（跑脚本）→ 脚本里再 `tools.read(...)` → `runToolCall`  
+- coding-agent：`ctx.executeTool` → NestedToolCallRunner → `runToolCall`
+
+**逻辑：** `prepare → execute → finalize`，与单工具相同；函数本身不 emit、不 push messages。
+
+**和直接 `tool.execute`：** 后者跳过钩子；需要权限一致时用 `runToolCall`。
+
+**场景理解（已确认）：** MCP 挂成百上千 SaaS API 时，可用脚本组合多次调用（像 workflow），中间结果不必每条都进模型上下文，省上下文、少轮次。  
+更正表述：不是「把 MCP 又简化一层协议」，而是「模型侧接口变简单（写编排）；内部调用仍走完整流水线」。
+
+例子：`packages/agent/examples/mcp-codemode/tools.ts` 的 `createNestedToolRunner`。
