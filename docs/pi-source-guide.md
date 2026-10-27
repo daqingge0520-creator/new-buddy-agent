@@ -1,4 +1,4 @@
-> **版本锁定**：本文与本仓库示例均锁定 pi **v1.2.0**（`@earendil-works/pi-ai@1.2.0`、`@earendil-works/pi-agent-core@1.2.0`）。不要跟 pi 的 main。可运行的 MVP 在 [`src/`](../src/)：`npm run demo`（离线 faux）和 `npm start`（`POST /v1/chat` SSE）。下文第 5 节是 Pi 循环摘录，不是当前宿主。这个切片没有数据库，也没有网关。
+> **版本锁定**：本文与本仓库示例均锁定 pi **v1.2.0**（`@earendil-works/pi-ai@1.2.0`、`@earendil-works/pi-agent-core@1.2.0`）。不要跟 pi 的 main。可运行的 MVP 在 [`src/`](../src/)：`npm run demo`（离线 faux）和 `npm start`（`POST /v1/chat` SSE，SQLite 会话）。下文第 5 节是 Pi 循环摘录，不是当前宿主。这个切片没有网关，也没有鉴权钩子。
 
 # Pi 源码导读（pi-ai + pi-agent-core）——为重写「门店智能客服」准备
 

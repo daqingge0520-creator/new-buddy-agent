@@ -2,103 +2,61 @@ import { pathToFileURL } from "node:url";
 import { startApp } from "./server.js";
 import { postChat, type SseEvent } from "./sse.js";
 
-const MEMBER_QUESTION = "帮我查一下 13800000000 这个会员";
-const FAQ_QUESTION = "你们营业时间是几点？";
-
-/**
- * Offline tour of the host: question → beforeToolCall → fixture tool → SSE text.
- * Always uses the faux provider so the scripted tool call stays deterministic.
- * `npm start` is the path that uses DeepSeek when DEEPSEEK_API_KEY is set.
- */
+/** Offline tour: POST /v1/chat → scaffold tool → SQLite → SSE. Always faux. */
 export async function main(): Promise<void> {
   if (process.env.DEEPSEEK_API_KEY?.trim()) {
-    console.log(
-      "DEEPSEEK_API_KEY is set. This demo still uses the faux provider. Run npm start and POST /v1/chat to call DeepSeek.",
-    );
+    console.log("DEEPSEEK_API_KEY is set. This demo still uses faux. npm start calls DeepSeek.");
   }
-  const app = await startApp({ port: 0, host: "127.0.0.1", mode: "faux", token: "demo" });
+  const app = await startApp({ port: 0, host: "127.0.0.1", mode: "faux", dbPath: ":memory:" });
   console.log(`demo ${app.baseUrl} mode=${app.mode}`);
   try {
-    await runPrintedTurn(app.baseUrl, MEMBER_QUESTION, (events, text) => {
-      assertAuth(events, "lookup_member", true);
-      assertToolDone(events, "lookup_member", false);
-      if (!text.includes("张三") || !text.includes("320")) {
-        throw new Error(`Member answer did not include the fixture record: ${text}`);
-      }
-      assertChunked(events);
+    const events = await postChat({
+      baseUrl: app.baseUrl,
+      content: "你好",
+      onEvent: printEvent,
     });
-    await runPrintedTurn(app.baseUrl, FAQ_QUESTION, (events, text) => {
-      assertAuth(events, "search_faq", true);
-      assertToolDone(events, "search_faq", false);
-      if (!text.includes("10:00")) throw new Error(`FAQ answer did not include store hours: ${text}`);
-      assertChunked(events);
-    });
+    const sessionId = sessionOf(events);
+    const text = deltas(events);
+    if (!text.includes("scaffold:你好")) throw new Error(`Missing scaffold echo: ${text}`);
+    if (events.filter((event) => event.event === "message.delta").length < 2) {
+      throw new Error("Expected more than one SSE text chunk");
+    }
+    const stored = app.store.loadMessages(sessionId);
+    const roles = stored.map((message) => message.role).join(",");
+    if (roles !== "user,assistant,toolResult,assistant") throw new Error(`Unexpected transcript: ${roles}`);
+    const firstCommit = events.findIndex((event) => event.event === "message.committed");
+    const firstDelta = events.findIndex((event) => event.event === "message.delta");
+    if (firstCommit < 0 || firstDelta < 0 || firstCommit > firstDelta) {
+      throw new Error("User message was not committed before streamed text");
+    }
+    console.log(`persisted ${stored.length} messages in ${sessionId}`);
   } finally {
     await app.close();
   }
   console.log("demo ok");
 }
 
-async function runPrintedTurn(
-  baseUrl: string,
-  content: string,
-  check: (events: SseEvent[], text: string) => void,
-): Promise<void> {
-  console.log(`\nPOST /v1/chat  ${content}`);
-  let inline = false;
-  const events = await postChat({
-    baseUrl,
-    token: "demo",
-    content,
-    onEvent: (event) => {
-      if (event.event === "message.delta") {
-        const delta = deltaText(event);
-        if (!delta) return;
-        process.stdout.write(delta);
-        inline = true;
-        return;
-      }
-      if (inline) {
-        process.stdout.write("\n");
-        inline = false;
-      }
-      console.log(`[${event.event}] ${JSON.stringify(event.data)}`);
-    },
-  });
-  if (inline) process.stdout.write("\n");
-  const text = events
-    .filter((event) => event.event === "message.delta")
-    .map((event) => deltaText(event))
+function printEvent(event: SseEvent): void {
+  if (event.event === "message.delta" && isRecord(event.data) && typeof event.data.delta === "string") {
+    process.stdout.write(event.data.delta);
+    return;
+  }
+  if (event.event !== "message.delta") console.log(`\n[${event.event}] ${JSON.stringify(event.data)}`);
+}
+
+function sessionOf(events: SseEvent[]): string {
+  const session = events.find((event) => event.event === "session");
+  if (!session || !isRecord(session.data) || typeof session.data.sessionId !== "string") {
+    throw new Error("Missing session event");
+  }
+  return session.data.sessionId;
+}
+
+function deltas(events: SseEvent[]): string {
+  return events
+    .filter((event) => event.event === "message.delta" && isRecord(event.data) && typeof event.data.delta === "string")
+    .map((event) => (event.data as { delta: string }).delta)
     .join("");
-  const done = events.find((event) => event.event === "done");
-  if (!done || !isRecord(done.data) || done.data.stopReason !== "stop") {
-    throw new Error(`Turn did not finish with stop: ${JSON.stringify(done?.data ?? null)}`);
-  }
-  check(events, text);
-}
-
-function assertAuth(events: SseEvent[], tool: string, allowed: boolean): void {
-  const auth = events.find((event) => event.event === "tool.auth" && isRecord(event.data) && event.data.tool === tool);
-  if (!auth || !isRecord(auth.data) || auth.data.allowed !== allowed) {
-    throw new Error(`Missing tool.auth for ${tool}: ${JSON.stringify(events)}`);
-  }
-}
-
-function assertToolDone(events: SseEvent[], tool: string, isError: boolean): void {
-  const done = events.find((event) => event.event === "tool.done" && isRecord(event.data) && event.data.tool === tool);
-  if (!done || !isRecord(done.data) || done.data.isError !== isError) {
-    throw new Error(`Missing tool.done for ${tool}: ${JSON.stringify(events)}`);
-  }
-}
-
-function assertChunked(events: SseEvent[]): void {
-  const deltas = events.filter((event) => event.event === "message.delta");
-  if (deltas.length < 2) throw new Error(`Expected streamed chunks, got ${deltas.length} delta event(s)`);
-}
-
-function deltaText(event: SseEvent): string {
-  if (!isRecord(event.data) || typeof event.data.delta !== "string") return "";
-  return event.data.delta;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

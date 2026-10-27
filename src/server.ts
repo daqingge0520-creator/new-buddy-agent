@@ -1,15 +1,16 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { bearerToken, expectedApiToken, grantForCaller, tokenMatches } from "./auth.js";
 import { createTurnRuntime, selectModelMode, type ModelMode } from "./model.js";
 import { startTurn } from "./run-turn.js";
 import { formatSse } from "./sse.js";
+import { SessionStore } from "./store.js";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface AppOptions {
   port?: number;
   host?: string;
-  /** Overrides BUDDY_API_TOKEN / the local demo token. */
-  token?: string;
-  /** Overrides key-based model selection. The offline demo pins faux. */
+  dbPath?: string;
+  /** Pins faux or deepseek. Default follows DEEPSEEK_API_KEY. */
   mode?: ModelMode;
   env?: NodeJS.ProcessEnv;
 }
@@ -17,6 +18,7 @@ export interface AppOptions {
 export interface RunningApp {
   baseUrl: string;
   mode: ModelMode;
+  store: SessionStore;
   close: () => Promise<void>;
 }
 
@@ -32,16 +34,14 @@ export class HttpError extends Error {
 export async function startApp(options: AppOptions = {}): Promise<RunningApp> {
   const env = options.env ?? process.env;
   const mode = options.mode ?? selectModelMode(env);
-  const token = options.token ?? expectedApiToken(env);
-  if (mode === "deepseek") {
-    createTurnRuntime({ mode, userText: "", env });
-  }
+  if (mode === "deepseek") createTurnRuntime({ mode, userText: "", env });
   const host = options.host ?? env.HOST ?? "127.0.0.1";
   const port = options.port ?? Number(env.PORT ?? 8787);
   if (!Number.isInteger(port) || port < 0) throw new Error(`Invalid PORT: ${String(env.PORT ?? options.port)}`);
+  const store = new SessionStore(options.dbPath ?? env.BUDDY_DB ?? "data/buddy.sqlite");
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, { mode, token, env }).catch((error: unknown) => {
+    void handleRequest(req, res, { mode, env, store }).catch((error: unknown) => {
       if (res.headersSent) {
         if (!res.writableEnded && !res.destroyed) res.end();
         return;
@@ -52,29 +52,25 @@ export async function startApp(options: AppOptions = {}): Promise<RunningApp> {
     });
   });
 
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error) => reject(error);
-    server.once("error", onError);
-    server.listen(port, host, () => {
-      server.off("error", onError);
-      resolve();
-    });
-  });
-
+  await listen(server, port, host);
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Expected a TCP listen address");
   const advertisedHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   return {
     mode,
+    store,
     baseUrl: `http://${advertisedHost}:${address.port}`,
-    close: () => closeServer(server),
+    close: async () => {
+      await closeServer(server);
+      store.close();
+    },
   };
 }
 
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  ctx: { mode: ModelMode; token: string; env: NodeJS.ProcessEnv },
+  ctx: { mode: ModelMode; env: NodeJS.ProcessEnv; store: SessionStore },
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   if (req.method === "GET" && url.pathname === "/health") {
@@ -91,23 +87,14 @@ async function handleRequest(
 async function handleChat(
   req: IncomingMessage,
   res: ServerResponse,
-  ctx: { mode: ModelMode; token: string; env: NodeJS.ProcessEnv },
+  ctx: { mode: ModelMode; env: NodeJS.ProcessEnv; store: SessionStore },
 ): Promise<void> {
-  const presented = bearerToken(headerString(req.headers.authorization));
-  if (!presented || !tokenMatches(presented, ctx.token)) {
-    sendJson(res, 401, { error: "unauthorized" });
-    return;
-  }
-
-  const raw = await readBody(req);
-  let parsed: unknown;
-  try {
-    parsed = raw.trim() ? (JSON.parse(raw) as unknown) : {};
-  } catch {
-    throw new HttpError(400, "invalid json");
-  }
-  const content = readContent(parsed);
-  if (!content) throw new HttpError(400, "content is required");
+  const body = await readJson(req);
+  const content = readContent(body);
+  const requested = readSessionId(body);
+  if (requested && !ctx.store.hasSession(requested)) throw new HttpError(404, "session not found");
+  const sessionId = requested ?? ctx.store.createSession();
+  const history = ctx.store.loadMessages(sessionId);
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -115,11 +102,14 @@ async function handleChat(
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
+  writeSse(res, "session", { sessionId });
 
   let finished = false;
   const turn = startTurn({
     content,
-    grant: grantForCaller(),
+    sessionId,
+    history,
+    store: ctx.store,
     mode: ctx.mode,
     env: ctx.env,
     emit: (event, data) => writeSse(res, event, data),
@@ -137,19 +127,30 @@ async function handleChat(
   }
 }
 
-function readContent(body: unknown): string | undefined {
-  if (!body || typeof body !== "object") return undefined;
+function readContent(body: unknown): string {
+  if (!body || typeof body !== "object") throw new HttpError(400, "content is required");
   const content = (body as { content?: unknown }).content;
-  if (typeof content !== "string") return undefined;
-  const trimmed = content.trim();
-  if (!trimmed) return undefined;
-  if (trimmed.length > 4000) throw new HttpError(400, "content is too long");
-  return trimmed;
+  if (typeof content !== "string" || !content.trim()) throw new HttpError(400, "content is required");
+  if (content.trim().length > 4000) throw new HttpError(400, "content is too long");
+  return content.trim();
 }
 
-function headerString(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
+function readSessionId(body: unknown): string | undefined {
+  if (!body || typeof body !== "object" || !("sessionId" in body)) return undefined;
+  const sessionId = (body as { sessionId?: unknown }).sessionId;
+  if (sessionId === undefined) return undefined;
+  if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new HttpError(400, "invalid sessionId");
+  return sessionId;
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const raw = await readBody(req);
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new HttpError(400, "invalid json");
+  }
 }
 
 function writeSse(res: ServerResponse, event: string, data: unknown): void {
@@ -191,6 +192,17 @@ function readBody(req: IncomingMessage, limit = 32_768): Promise<string> {
       resolve(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", (error) => fail(error));
+  });
+}
+
+function listen(server: Server, port: number, host: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(port, host, () => {
+      server.off("error", onError);
+      resolve();
+    });
   });
 }
 
