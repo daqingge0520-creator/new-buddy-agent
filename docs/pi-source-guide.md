@@ -1,4 +1,4 @@
-> **版本锁定**：本文与本仓库示例均锁定 pi **v1.2.0**（`@earendil-works/pi-ai@1.2.0`、`@earendil-works/pi-agent-core@1.2.0`）。不要跟 pi 的 main。可运行示例在 [`examples/minimal-tool-loop/demo.mts`](../examples/minimal-tool-loop/demo.mts)。
+> **版本锁定**：本文与本仓库示例均锁定 pi **v1.2.0**（`@earendil-works/pi-ai@1.2.0`、`@earendil-works/pi-agent-core@1.2.0`）。不要跟 pi 的 main。可运行的 MVP 在 [`src/`](../src/)：`npm run demo`（离线 faux）和 `npm start`（`POST /v1/chat` SSE）。下文第 5 节是 Pi 循环摘录，不是当前宿主。这个切片没有数据库，也没有网关。
 
 # Pi 源码导读（pi-ai + pi-agent-core）——为重写「门店智能客服」准备
 
@@ -225,7 +225,7 @@ Agent.prompt(text)                                   agent.ts ~373
 ---
 ## 5. 最小可跑通示例
 
-文件：本仓库 [`examples/minimal-tool-loop/demo.mts`](../examples/minimal-tool-loop/demo.mts)。依赖：`@earendil-works/pi-ai@1.2.0`、`@earendil-works/pi-agent-core@1.2.0`、`typebox`、`tsx`。设置了 `DEEPSEEK_API_KEY` 时走真实的 DeepSeek，否则走 faux provider。仓库里不提交 key。
+下面这段是当时的最小循环摘录，用来对照 Pi 的 API。当前宿主在 `src/`，用 `npm run demo` / `npm start` 跑。依赖仍是 `@earendil-works/pi-ai@1.2.0`、`@earendil-works/pi-agent-core@1.2.0`、`typebox`、`tsx`。有 `DEEPSEEK_API_KEY` 时 `npm start` 走 DeepSeek 的 OpenAI 兼容接口，否则走 faux。仓库里不提交 key。
 
 ```ts
 import { createModels, fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall, Type } from "@earendil-works/pi-ai";

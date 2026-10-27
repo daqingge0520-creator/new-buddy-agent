@@ -8,7 +8,9 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "demo": "tsx examples/minimal-tool-loop/demo.mts",
+    "start": "tsx src/main.ts",
+    "demo": "tsx src/demo.ts",
+    "test": "tsx --test test/mvp.test.ts",
     "typecheck": "tsc --noEmit --strict"
   },
   "dependencies": {
