@@ -1,29 +1,69 @@
 # Buddy Agent
 
-门店智能客服（Buddy Agent）正在重写到 [Pi](https://github.com/earendil-works/pi) 运行时。运行时只用 `@earendil-works/pi-ai` 和 `@earendil-works/pi-agent-core`，**锁定 v1.2.0**。不用 `pi-coding-agent` 当运行时。
+门店客服框架的最小切片，跑在 [Pi](https://github.com/earendil-works/pi) 上。只用 `@earendil-works/pi-ai` 和 `@earendil-works/pi-agent-core`，**锁定 v1.2.0**。不用 `pi-coding-agent`。
 
-这一周的目标是把一条链路跑通：**一个问题 → 一次工具调用 → 流式回答**。本仓库目前只有源码导读和本地最小 demo，没有 HTTP / SSE、没有 MySQL、也没有多租户宿主层。
-
-- 导读：[docs/pi-source-guide.md](docs/pi-source-guide.md)
-- 示例：[examples/minimal-tool-loop/demo.mts](examples/minimal-tool-loop/demo.mts)
-
-## 环境
-
-优先使用 **Node.js >= 22.19**。`pi-ai` / `pi-agent-core` 的 `engines` 写的是 `node >= 22.19.0`。Node 20 上这个 demo 曾经跑通过，只适合本地看效果，不要拿来当生产运行时。
-
-不需要 API key。默认走 faux provider 和假的「查会员」工具。不要把密钥写进仓库。
+```
+POST /v1/chat
+  Pi Agent（无 key：faux；有 DEEPSEEK_API_KEY：DeepSeek OpenAI Chat Completions）
+  scaffold 占位工具
+  message_end 写入 SQLite 之后才发 message.committed
+  message.delta 流式输出
+```
 
 ## 运行
 
+Node.js **>= 22.19**。不要把密钥写进仓库。
+
 ```bash
 npm install
-npm run demo
+npm run demo    # 固定 faux，不消耗 key
+npm test
+npm start       # 有 DEEPSEEK_API_KEY 才走 DeepSeek
 ```
-
-类型检查：
 
 ```bash
-npm run typecheck
+curl -N -X POST http://127.0.0.1:8787/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"content":"你好"}'
 ```
 
-默认输出里应能看到鉴权钩子、工具完成、逐 token 打出的会员答案，以及 `agent_end`。如果环境里已经设置了 `DEEPSEEK_API_KEY`，同一条 demo 会改走 DeepSeek；本仓库不提供、也不提交任何 key。
+继续同一会话时带上返回的 `sessionId`。数据库文件默认 `data/buddy.sqlite`（`BUDDY_DB` 可改）。`DEEPSEEK_BASE_URL` 覆盖模型地址，默认 `https://api.deepseek.com`。`DEEPSEEK_MODEL` 默认 `deepseek-flash`。`HOST` / `PORT` 默认 `127.0.0.1:8787`。
+
+`npm run demo` 即使环境里有 key 也走 faux。真实模型用 `npm start`。
+
+## API
+
+`GET /health` → `{ "ok": true, "mode": "faux" | "deepseek" }`
+
+`POST /v1/chat`
+
+```json
+{ "content": "你好", "sessionId": "可选" }
+```
+
+`text/event-stream`：
+
+| 事件 | 含义 |
+|---|---|
+| `session` | 会话已写入。`{ "sessionId" }` |
+| `message.delta` | 未落库的文本片段 |
+| `message.committed` | 该条消息已写入 SQLite 之后才发送 |
+| `tool.done` | `scaffold` 执行结束 |
+| `done` | 本轮结束 |
+| `error` | 本轮失败 |
+
+## 范围内
+
+- Pi 循环与 `POST /v1/chat` SSE
+- 一个占位工具 `scaffold`（回显参数，不是门店业务）
+- SQLite 会话消息。`message_end` 的监听器先写入，再发 `message.committed`；Pi 会等这个监听器结束
+- 无 key 用 faux；有 key 用 DeepSeek 的 OpenAI 兼容接口
+
+## 这次不做
+
+- 鉴权与 `beforeToolCall`
+- 网关、多租户、MySQL、生产部署
+- 真实门店工具和公司数据
+- `pi-coding-agent`、Claude Agent SDK
+
+导读在 [docs/pi-source-guide.md](docs/pi-source-guide.md)，其中的多租户设计不是这个切片。
